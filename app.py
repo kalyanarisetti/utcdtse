@@ -1,130 +1,136 @@
-# app.py: A Streamlit web application for universal file-to-text conversion.
-# This app allows users to upload a file (Word, Excel, PowerPoint, HTML, ZIP),
-# see a preview of the extracted text, and download the full content as a .txt file.
+# Install necessary packages quietly in the Colab environment
+import subprocess
+import sys
 
-import streamlit as st
+def install(package):
+    """A helper function to install a package using pip."""
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package, "-q"])
+
+# Install all required libraries
+install("python-docx")
+install("openpyxl")
+install("python-pptx")
+install("markdownify")
+install("beautifulsoup4")
+
+# Import the main libraries required for the conversion tasks
 import os
-import zipfile
-import io
+from google.colab import files
 import docx
 import openpyxl
-import pptx
+from pptx import Presentation
 from markdownify import markdownify as md
+import zipfile
+import io
 
-# --- File Processing Functions (adapted from the Colab version) ---
+def convert_file_to_text(file_content, file_name):
+    """
+    Identifies the file type from its name and converts its content to plain text.
+    It handles DOCX, XLSX, PPTX, HTML, and ZIP files.
+    """
+    # Get the file extension (e.g., '.docx') to determine the file type
+    _, file_extension = os.path.splitext(file_name)
+    output_text = ""
 
-def convert_docx_to_text(file_stream):
-    """Extracts text from a .docx file stream."""
-    doc = docx.Document(file_stream)
-    return "\n".join([para.text for para in doc.paragraphs])
+    try:
+        # --- Process Microsoft Word (.docx) files ---
+        if file_extension == '.docx':
+            # Open the document from in-memory bytes
+            doc = docx.Document(io.BytesIO(file_content))
+            # Extract text from each paragraph
+            output_text = '\n'.join([para.text for para in doc.paragraphs])
 
-def convert_xlsx_to_text(file_stream):
-    """Extracts text from an .xlsx file stream, sheet by sheet."""
-    workbook = openpyxl.load_workbook(file_stream)
-    full_text = []
-    for sheet_name in workbook.sheetnames:
-        full_text.append(f"--- Sheet: {sheet_name} ---\n")
-        sheet = workbook[sheet_name]
-        for row in sheet.iter_rows():
-            row_text = "\t".join([str(cell.value) if cell.value is not None else "" for cell in row])
-            full_text.append(row_text)
-    return "\n".join(full_text)
+        # --- Process Microsoft Excel (.xlsx) files ---
+        elif file_extension == '.xlsx':
+            # Load the workbook from in-memory bytes
+            workbook = openpyxl.load_workbook(io.BytesIO(file_content))
+            # Iterate through each sheet and each row to extract cell values
+            for sheet in workbook.worksheets:
+                for row in sheet.iter_rows():
+                    # Join cell values with a tab, handling empty cells
+                    output_text += '\t'.join([str(cell.value or '') for cell in row]) + '\n'
 
-def convert_pptx_to_text(file_stream):
-    """Extracts text from a .pptx file stream from all shapes on all slides."""
-    presentation = pptx.Presentation(file_stream)
-    full_text = []
-    for i, slide in enumerate(presentation.slides):
-        full_text.append(f"--- Slide {i+1} ---\n")
-        for shape in slide.shapes:
-            if hasattr(shape, "text"):
-                full_text.append(shape.text)
-    return "\n".join(full_text)
+        # --- Process Microsoft PowerPoint (.pptx) files ---
+        elif file_extension == '.pptx':
+            # Load the presentation from in-memory bytes
+            prs = Presentation(io.BytesIO(file_content))
+            # Extract text from shapes on each slide
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text"):
+                        output_text += shape.text + '\n'
 
-def convert_html_to_markdown(file_stream):
-    """Converts HTML file content into Markdown using markdownify."""
-    html_content = file_stream.read().decode('utf-8')
-    # Using markdownify to convert HTML to Markdown text
-    return md(html_content)
+        # --- Process HTML (.html, .htm) files ---
+        elif file_extension in ['.html', '.htm']:
+            # Use the markdownify library to convert HTML into clean Markdown text
+            # Decode the byte content into a string for processing
+            output_text = md(file_content.decode('utf-8', errors='ignore'))
 
-def process_zip_file(file_stream):
-    """Extracts files from a .zip archive in memory and converts them."""
-    full_text = []
-    with zipfile.ZipFile(file_stream, 'r') as zf:
-        for filename in zf.namelist():
-            # Avoid processing system files or directories
-            if not filename.startswith('__MACOSX/') and not filename.endswith('/'):
-                full_text.append(f"--- Zipped File: {filename} ---\n")
-                with zf.open(filename) as unzipped_file:
-                    unzipped_stream = io.BytesIO(unzipped_file.read())
-                    # Recursively call the main converter function
-                    converted_content = universal_file_converter(filename, unzipped_stream)
-                    full_text.append(converted_content)
-                    full_text.append("\n" + "="*40 + "\n")
-    return "\n".join(full_text)
+        # --- Process ZIP archives (.zip) ---
+        elif file_extension == '.zip':
+            # Open the zip file from in-memory bytes
+            with zipfile.ZipFile(io.BytesIO(file_content)) as z:
+                # Loop through each file within the archive
+                for info in z.infolist():
+                    # Skip directories and system files (like those from macOS)
+                    if not info.is_dir() and not info.filename.startswith('__MACOSX'):
+                        with z.open(info.filename) as member_file:
+                            member_content = member_file.read()
+                            output_text += f"--- Converted content from: {info.filename} ---\n"
+                            # Recursively call this function to process the file inside the zip
+                            output_text += convert_file_to_text(member_content, info.filename) + "\n\n"
+        
+        # --- Handle unsupported file types ---
+        else:
+            output_text = f"Unsupported file type: '{file_extension}'"
 
-# --- Main Controller Function ---
+    except Exception as e:
+        # Return an error message if any part of the conversion fails
+        return f"An error occurred while processing {file_name}: {str(e)}"
 
-def universal_file_converter(filename, file_stream):
-    """Acts as a router to call the correct conversion function based on file extension."""
-    _, extension = os.path.splitext(filename.lower())
+    return output_text
 
-    # Route to the appropriate function
-    if extension == '.docx':
-        return convert_docx_to_text(file_stream)
-    elif extension == '.xlsx':
-        return convert_xlsx_to_text(file_stream)
-    elif extension == '.pptx':
-        return convert_pptx_to_text(file_stream)
-    elif extension in ['.html', '.htm']:
-        return convert_html_to_markdown(file_stream)
-    elif extension == '.zip':
-        return process_zip_file(file_stream)
-    else:
-        # Fallback for plain text or unsupported files
-        try:
-            return file_stream.read().decode('utf-8')
-        except Exception:
-            return f"Unsupported file type: {extension}. Could not read file."
+def main():
+    """
+    The main function that orchestrates the file upload, conversion, 
+    preview display, and download functionality in Google Colab.
+    """
+    print("Please upload a file to convert (.docx, .xlsx, .pptx, .html, .zip)")
+    
+    # Trigger Colab's built-in file upload interface
+    uploaded = files.upload()
 
-# --- Streamlit App UI ---
+    # Check if a file was actually uploaded
+    if not uploaded:
+        print("\nNo file was selected. Please run the cell again to upload.")
+        return
 
-# Set the page title and a brief description
-st.set_page_config(page_title="File-to-Text Converter", layout="centered")
-st.title("📄 Universal File-to-Text Converter")
-st.markdown("Drag, drop, and download. It's that simple.")
-st.markdown("Supports: `.docx`, `.xlsx`, `.pptx`, `.html`, `.zip`")
+    # The upload result is a dictionary; get the name and content of the first file
+    file_name = next(iter(uploaded))
+    file_content = uploaded[file_name]
 
-# [1] File uploader widget for user input
-uploaded_file = st.file_uploader(
-    "Drag and drop your file here",
-    type=['docx', 'xlsx', 'pptx', 'html', 'htm', 'zip'],
-    label_visibility="collapsed"
-)
+    print(f"\nProcessing '{file_name}'...")
+    
+    # Call the conversion function to get the full text
+    full_text = convert_file_to_text(file_content, file_name)
 
-if uploaded_file is not None:
-    # Get filename and prepare a file stream
-    filename = uploaded_file.name
-    file_stream = io.BytesIO(uploaded_file.getvalue())
+    # --- Display Preview of the Output ---
+    print("\n--- Conversion Preview (First 1000 characters) ---")
+    print(full_text[:1000])
+    print("--------------------------------------------------\n")
 
-    st.info(f"Processing `{filename}`...")
+    # --- Offer the Full Text for Download ---
+    # Create a new filename for the output text file
+    output_filename = os.path.splitext(file_name)[0] + ".txt"
+    # Write the converted text to a local file in the Colab environment
+    with open(output_filename, "w", encoding="utf-8") as f:
+        f.write(full_text)
 
-    # [2] Process the file into a text string
-    full_text = universal_file_converter(filename, file_stream)
+    print(f"Conversion complete. Preparing '{output_filename}' for download.")
+    # Trigger Colab's file download utility
+    files.download(output_filename)
 
-    # [3] Display a preview of the first 1000 characters
-    st.subheader("✅ Conversion Successful! Here's a Preview:")
-    st.text_area(
-        "Showing first 1000 characters of the output",
-        full_text[:1000],
-        height=250
-    )
+# --- Execute the main function ---
+if __name__ == "__main__":
+    main()
 
-    # [4] Offer the full text file for download
-    output_filename = os.path.splitext(filename)[0] + '.txt'
-    st.download_button(
-        label="📥 Download Full Text File",
-        data=full_text.encode('utf-8'),
-        file_name=output_filename,
-        mime='text/plain',
-    )
